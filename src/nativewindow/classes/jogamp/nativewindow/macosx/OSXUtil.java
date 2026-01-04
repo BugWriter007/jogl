@@ -32,8 +32,10 @@ import com.jogamp.nativewindow.NativeWindowFactory;
 import com.jogamp.nativewindow.util.Insets;
 import com.jogamp.nativewindow.util.Point;
 
+import java.lang.reflect.Method;
 import java.security.PrivilegedAction;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import com.jogamp.common.ExceptionUtils;
 import com.jogamp.common.os.NativeLibrary;
@@ -53,6 +55,138 @@ public class OSXUtil implements ToolkitProperties {
 
     private static final ThreadLocal<Boolean> tlsIsMainThread = new ThreadLocal<Boolean>();
 
+    /**
+     * Optional AWT/EDT helpers used to avoid macOS AppKit &amp; AWT-EDT deadlocks when synchronously
+     * executing tasks on the AppKit main thread.
+     * <p>
+     * {@code nativewindow} can be used without AWT (and even without the {@code java.desktop} module)
+     * in some configurations, hence these AWT classes are resolved via reflection and are additionally
+     * guarded by {@link NativeWindowFactory#isAWTAvailable()}.
+     * </p>
+     * <p>
+     * Rationale (Bug 1478): On macOS 13/14, calling {@link #RunOnMainThread(boolean, boolean, Runnable)}
+     * with {@code waitUntilDone=true} from the AWT Event Dispatch Thread (EDT) can deadlock if the
+     * AppKit-side work needs the EDT to keep pumping events (e.g. during peer/window realization).
+     * Using {@code java.awt.SecondaryLoop} keeps the EDT dispatching while still providing
+     * synchronous semantics.
+     * </p>
+     */
+    private static final class AWTEDTUtil {
+        private static final boolean available;
+        private static final Method eventQueueIsDispatchThread;
+        private static final Method toolkitGetDefaultToolkit;
+        private static final Method toolkitGetSystemEventQueue;
+        private static final Method eventQueueCreateSecondaryLoop;
+        private static final Method secondaryLoopEnter;
+        private static final Method secondaryLoopExit;
+
+        static {
+            boolean ok = false;
+            Method mIsDispatchThread = null;
+            Method mGetDefaultToolkit = null;
+            Method mGetSystemEventQueue = null;
+            Method mCreateSecondaryLoop = null;
+            Method mEnter = null;
+            Method mExit = null;
+
+            try {
+                final ClassLoader cl = OSXUtil.class.getClassLoader();
+                final Class<?> eventQueueClass = Class.forName("java.awt.EventQueue", false, cl);
+                final Class<?> toolkitClass = Class.forName("java.awt.Toolkit", false, cl);
+                final Class<?> secondaryLoopClass = Class.forName("java.awt.SecondaryLoop", false, cl);
+
+                mIsDispatchThread = eventQueueClass.getMethod("isDispatchThread");
+                mGetDefaultToolkit = toolkitClass.getMethod("getDefaultToolkit");
+                mGetSystemEventQueue = toolkitClass.getMethod("getSystemEventQueue");
+                mCreateSecondaryLoop = eventQueueClass.getMethod("createSecondaryLoop");
+                mEnter = secondaryLoopClass.getMethod("enter");
+                mExit = secondaryLoopClass.getMethod("exit");
+
+                ok = true;
+            } catch (final Throwable t) {
+                ok = false;
+            }
+
+            available = ok;
+            eventQueueIsDispatchThread = mIsDispatchThread;
+            toolkitGetDefaultToolkit = mGetDefaultToolkit;
+            toolkitGetSystemEventQueue = mGetSystemEventQueue;
+            eventQueueCreateSecondaryLoop = mCreateSecondaryLoop;
+            secondaryLoopEnter = mEnter;
+            secondaryLoopExit = mExit;
+        }
+
+        /**
+         * @return {@code true} if the current thread is the AWT EDT, otherwise {@code false}.
+         */
+        private static boolean isDispatchThread() {
+            if( !available || !NativeWindowFactory.isAWTAvailable() ) {
+                return false;
+            }
+            try {
+                return ((Boolean) eventQueueIsDispatchThread.invoke(null)).booleanValue();
+            } catch (final Throwable t) {
+                return false;
+            }
+        }
+
+        /**
+         * Creates an AWT {@code SecondaryLoop} for the current {@code EventQueue}.
+         * <p>
+         * When entered on the EDT, the secondary loop keeps dispatching AWT events, allowing re-entrant
+         * operations that would otherwise deadlock if the EDT was blocked in {@code Object.wait()}.
+         * </p>
+         *
+         * @return the secondary loop instance, or {@code null} if unavailable.
+         */
+        private static Object createSecondaryLoop() {
+            if( !available || !NativeWindowFactory.isAWTAvailable() ) {
+                return null;
+            }
+            try {
+                final Object toolkit = toolkitGetDefaultToolkit.invoke(null);
+                final Object eventQueue = toolkitGetSystemEventQueue.invoke(toolkit);
+                return eventQueueCreateSecondaryLoop.invoke(eventQueue);
+            } catch (final Throwable t) {
+                return null;
+            }
+        }
+
+        /**
+         * Enters the given AWT {@code SecondaryLoop}.
+         *
+         * @param loop secondary loop instance, may be {@code null}.
+         * @return {@code true} if entered, otherwise {@code false}.
+         */
+        private static boolean enterSecondaryLoop(final Object loop) {
+            if( null == loop ) {
+                return false;
+            }
+            try {
+                return ((Boolean) secondaryLoopEnter.invoke(loop)).booleanValue();
+            } catch (final Throwable t) {
+                return false;
+            }
+        }
+
+        /**
+         * Exits the given AWT {@code SecondaryLoop}.
+         * <p>
+         * Safe to call even if the loop is already exiting.
+         * </p>
+         *
+         * @param loop secondary loop instance, may be {@code null}.
+         */
+        private static void exitSecondaryLoop(final Object loop) {
+            if( null == loop ) {
+                return;
+            }
+            try {
+                secondaryLoopExit.invoke(loop);
+            } catch (final Throwable t) { /* ignore */ }
+        }
+    }
+
     /** FIXME HiDPI: OSX unique and maximum value {@value} */
     public static final int MAX_PIXELSCALE = 2;
 
@@ -61,33 +195,33 @@ public class OSXUtil implements ToolkitProperties {
      * @see ToolkitProperties
      */
     public static synchronized void initSingleton() {
-      if(!isInit) {
-          final boolean useMainThreadChecker = Debug.debug("OSXUtil.MainThreadChecker");
-          if(DEBUG || useMainThreadChecker) {
-              System.out.println("OSXUtil.initSingleton() - useMainThreadChecker "+useMainThreadChecker);
-          }
-          if(!NWJNILibLoader.loadNativeWindow("macosx")) {
-              throw new NativeWindowException("NativeWindow MacOSX native library load error.");
-          }
-          if( useMainThreadChecker ) {
-              final String libMainThreadChecker = "/Applications/Xcode.app/Contents/Developer/usr/lib/libMainThreadChecker.dylib";
-              final NativeLibrary lib = SecurityUtil.doPrivileged(new PrivilegedAction<NativeLibrary>() {
-                  @Override
-                  public NativeLibrary run() {
-                      return NativeLibrary.open(libMainThreadChecker, false, false, OSXUtil.class.getClassLoader(), true);
-                  } } );
-              if( null == lib ) {
-                  System.err.println("Could not load "+libMainThreadChecker);
-              } else {
-                  System.err.println("Loaded "+lib);
-              }
-          }
+        if(!isInit) {
+            final boolean useMainThreadChecker = Debug.debug("OSXUtil.MainThreadChecker");
+            if(DEBUG || useMainThreadChecker) {
+                System.out.println("OSXUtil.initSingleton() - useMainThreadChecker "+useMainThreadChecker);
+            }
+            if(!NWJNILibLoader.loadNativeWindow("macosx")) {
+                throw new NativeWindowException("NativeWindow MacOSX native library load error.");
+            }
+            if( useMainThreadChecker ) {
+                final String libMainThreadChecker = "/Applications/Xcode.app/Contents/Developer/usr/lib/libMainThreadChecker.dylib";
+                final NativeLibrary lib = SecurityUtil.doPrivileged(new PrivilegedAction<NativeLibrary>() {
+                    @Override
+                    public NativeLibrary run() {
+                        return NativeLibrary.open(libMainThreadChecker, false, false, OSXUtil.class.getClassLoader(), true);
+                    } } );
+                if( null == lib ) {
+                    System.err.println("Could not load "+libMainThreadChecker);
+                } else {
+                    System.err.println("Loaded "+lib);
+                }
+            }
 
-          if( !initIDs0() ) {
-              throw new NativeWindowException("MacOSX: Could not initialized native stub");
-          }
-          isInit = true;
-      }
+            if( !initIDs0() ) {
+                throw new NativeWindowException("MacOSX: Could not initialized native stub");
+            }
+            isInit = true;
+        }
     }
 
     /**
@@ -123,43 +257,43 @@ public class OSXUtil implements ToolkitProperties {
      * @return top-left client-area position in window units
      */
     public static Point GetLocationOnScreen(final long windowOrView, final int src_x, final int src_y) {
-      return (Point) GetLocationOnScreen0(windowOrView, src_x, src_y);
+        return (Point) GetLocationOnScreen0(windowOrView, src_x, src_y);
     }
 
     public static Insets GetInsets(final long windowOrView) {
-      return (Insets) GetInsets0(windowOrView);
+        return (Insets) GetInsets0(windowOrView);
     }
 
     public static float GetScreenPixelScaleByDisplayID(final int displayID) {
-      if( 0 != displayID ) {
-          return GetScreenPixelScale1(displayID);
-      } else {
-          return 1.0f; // default
-      }
+        if( 0 != displayID ) {
+            return GetScreenPixelScale1(displayID);
+        } else {
+            return 1.0f; // default
+        }
     }
     public static float GetScreenPixelScale(final long windowOrView) {
-      if( 0 != windowOrView ) {
-          return GetScreenPixelScale2(windowOrView);
-      } else {
-          return 1.0f; // default
-      }
+        if( 0 != windowOrView ) {
+            return GetScreenPixelScale2(windowOrView);
+        } else {
+            return 1.0f; // default
+        }
     }
     public static float GetWindowPixelScale(final long windowOrView) {
-      if( 0 != windowOrView ) {
-          return GetWindowPixelScale1(windowOrView);
-      } else {
-          return 1.0f; // default
-      }
+        if( 0 != windowOrView ) {
+            return GetWindowPixelScale1(windowOrView);
+        } else {
+            return 1.0f; // default
+        }
     }
     public static void SetWindowPixelScale(final long windowOrView, final float reqPixelScale) {
-      if( 0 != windowOrView ) {
-          SetWindowPixelScale1(windowOrView, reqPixelScale);
-      }
+        if( 0 != windowOrView ) {
+            SetWindowPixelScale1(windowOrView, reqPixelScale);
+        }
     }
 
     /** Creates an NSWindow on the main-thread */
     public static long CreateNSWindow(final int x, final int y, final int width, final int height) {
-      return RunOnMainThreadLong(false /* kickNSApp */, () -> { return CreateNSWindow0(x, y, width, height); });
+        return RunOnMainThreadLong(false /* kickNSApp */, () -> { return CreateNSWindow0(x, y, width, height); });
     }
     public static class WinAndView {
         public final long win;
@@ -168,31 +302,31 @@ public class OSXUtil implements ToolkitProperties {
     }
     /** Creates an NSWindow and retrieves its NSView on the main-thread */
     public static WinAndView CreateNSWindow2(final int x, final int y, final int width, final int height) {
-            final AtomicLong nsWin0 = new AtomicLong(0);
-            final AtomicLong nsView0 = new AtomicLong(0);
+        final AtomicLong nsWin0 = new AtomicLong(0);
+        final AtomicLong nsView0 = new AtomicLong(0);
 
-            OSXUtil.RunOnMainThread(true, false /* kickNSApp */, () -> {
-                final long w = OSXUtil.CreateNSWindow0(0, 0, 64, 64);
-                if( 0 != w ) {
-                    nsWin0.set( w );
-                    nsView0.set( OSXUtil.GetNSView0(w) );
-                }
-            });
-            return new WinAndView(nsWin0.get(), nsView0.get());
+        OSXUtil.RunOnMainThread(true, false /* kickNSApp */, () -> {
+            final long w = OSXUtil.CreateNSWindow0(0, 0, 64, 64);
+            if( 0 != w ) {
+                nsWin0.set( w );
+                nsView0.set( OSXUtil.GetNSView0(w) );
+            }
+        });
+        return new WinAndView(nsWin0.get(), nsView0.get());
     }
 
     public static void DestroyNSWindow(final long nsWindow) {
-      DestroyNSWindow0(nsWindow);
+        DestroyNSWindow0(nsWindow);
     }
     public static long GetNSView(final long nsWindow, final boolean onMainThread) {
-      if( onMainThread ) {
-          return RunOnMainThreadLong(false /* kickNSApp */, () -> { return GetNSView0(nsWindow); });
-      } else {
-          return GetNSView0(nsWindow);
-      }
+        if( onMainThread ) {
+            return RunOnMainThreadLong(false /* kickNSApp */, () -> { return GetNSView0(nsWindow); });
+        } else {
+            return GetNSView0(nsWindow);
+        }
     }
     public static long GetNSWindow(final long nsView) {
-      return GetNSWindow0(nsView);
+        return GetNSWindow0(nsView);
     }
 
     /**
@@ -205,11 +339,11 @@ public class OSXUtil implements ToolkitProperties {
      * @see #AddCASublayer(long, long)
      */
     public static long CreateCALayer(final int width, final int height, final float contentsScale) {
-      final long l = CreateCALayer0(width, height, contentsScale);
-      if(DEBUG) {
-          System.err.println("OSXUtil.CreateCALayer: 0x"+Long.toHexString(l)+" - "+Thread.currentThread().getName());
-      }
-      return l;
+        final long l = CreateCALayer0(width, height, contentsScale);
+        if(DEBUG) {
+            System.err.println("OSXUtil.CreateCALayer: 0x"+Long.toHexString(l)+" - "+Thread.currentThread().getName());
+        }
+        return l;
     }
 
     /**
@@ -326,6 +460,36 @@ public class OSXUtil implements ToolkitProperties {
         if( IsMainThread() ) {
             runnable.run(); // don't leave the JVM
         } else {
+            if( waitUntilDone && AWTEDTUtil.isDispatchThread() ) {
+                // Bug 1478: Avoid blocking the AWT EDT in Object.wait() while synchronously waiting for the
+                // AppKit main-thread runnable. The AppKit-side work (e.g. NSWindow/NSView creation used by the
+                // CALayer/JAWT path) can require AWT events to be processed during window/peer realization.
+                // Using an AWT SecondaryLoop keeps the EDT dispatching while we wait for completion.
+                final Object secondaryLoop = AWTEDTUtil.createSecondaryLoop();
+                if( null != secondaryLoop ) {
+                    final AtomicReference<Throwable> throwableRef = new AtomicReference<Throwable>();
+                    final Runnable runnable0 = new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                runnable.run();
+                            } catch (final Throwable t) {
+                                throwableRef.set(t);
+                            } finally {
+                                // Ensure the EDT leaves the nested event loop even if the runnable fails.
+                                AWTEDTUtil.exitSecondaryLoop(secondaryLoop);
+                            }
+                        }
+                    };
+                    RunOnMainThread0(kickNSApp, runnable0);
+                    AWTEDTUtil.enterSecondaryLoop(secondaryLoop);
+                    final Throwable throwable = throwableRef.get();
+                    if( null != throwable ) {
+                        throw new RuntimeException(throwable);
+                    }
+                    return;
+                }
+            }
             // Utilize Java side lock/wait and simply pass the Runnable async to OSX main thread,
             // otherwise we may freeze the OSX main thread.
             final Object sync = new Object();
@@ -355,6 +519,34 @@ public class OSXUtil implements ToolkitProperties {
         if( IsMainThread() ) {
             return task.eval(); // don't leave the JVM
         } else {
+            if( AWTEDTUtil.isDispatchThread() ) {
+                // See RunOnMainThread(..): keep the AWT EDT responsive while synchronously waiting for AppKit.
+                final Object secondaryLoop = AWTEDTUtil.createSecondaryLoop();
+                if( null != secondaryLoop ) {
+                    final AtomicLong result = new AtomicLong(0);
+                    final AtomicReference<Throwable> throwableRef = new AtomicReference<Throwable>();
+                    final Runnable runnable = new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                result.set(task.eval());
+                            } catch (final Throwable t) {
+                                throwableRef.set(t);
+                            } finally {
+                                // Ensure the EDT leaves the nested event loop even if the runnable fails.
+                                AWTEDTUtil.exitSecondaryLoop(secondaryLoop);
+                            }
+                        }
+                    };
+                    RunOnMainThread0(kickNSApp, runnable);
+                    AWTEDTUtil.enterSecondaryLoop(secondaryLoop);
+                    final Throwable throwable = throwableRef.get();
+                    if( null != throwable ) {
+                        throw new RuntimeException(throwable);
+                    }
+                    return result.get();
+                }
+            }
             // Utilize Java side lock/wait and simply pass the Runnable async to OSX main thread,
             // otherwise we may freeze the OSX main thread.
             final Object sync = new Object();
@@ -428,6 +620,34 @@ public class OSXUtil implements ToolkitProperties {
         if( IsMainThread() ) {
             return func.eval(args); // don't leave the JVM
         } else {
+            if( AWTEDTUtil.isDispatchThread() ) {
+                // See RunOnMainThread(..): keep the AWT EDT responsive while synchronously waiting for AppKit.
+                final Object secondaryLoop = AWTEDTUtil.createSecondaryLoop();
+                if( null != secondaryLoop ) {
+                    final AtomicReference<R> result = new AtomicReference<R>();
+                    final AtomicReference<Throwable> throwableRef = new AtomicReference<Throwable>();
+                    final Runnable runnable = new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                result.set(func.eval(args));
+                            } catch (final Throwable t) {
+                                throwableRef.set(t);
+                            } finally {
+                                // Ensure the EDT leaves the nested event loop even if the runnable fails.
+                                AWTEDTUtil.exitSecondaryLoop(secondaryLoop);
+                            }
+                        }
+                    };
+                    RunOnMainThread0(kickNSApp, runnable);
+                    AWTEDTUtil.enterSecondaryLoop(secondaryLoop);
+                    final Throwable throwable = throwableRef.get();
+                    if( null != throwable ) {
+                        throw new RuntimeException(throwable);
+                    }
+                    return result.get();
+                }
+            }
             // Utilize Java side lock/wait and simply pass the Runnable async to OSX main thread,
             // otherwise we may freeze the OSX main thread.
             final Object sync = new Object();
