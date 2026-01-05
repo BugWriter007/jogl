@@ -52,6 +52,9 @@ import jogamp.nativewindow.ToolkitProperties;
 public class OSXUtil implements ToolkitProperties {
     private static boolean isInit = false;
     private static final boolean DEBUG = Debug.debug("OSXUtil");
+    private static final boolean DEBUG_RUNONMAIN = Debug.debug("OSXUtil.RunOnMainThread");
+    private static final boolean DEBUG_RUNONMAIN_STACK = Debug.debug("OSXUtil.RunOnMainThread.Stack");
+    private static final boolean DEBUG_AWTEDTUTIL = Debug.debug("OSXUtil.AWTEDTUtil");
 
     private static final ThreadLocal<Boolean> tlsIsMainThread = new ThreadLocal<Boolean>();
 
@@ -114,6 +117,14 @@ public class OSXUtil implements ToolkitProperties {
             eventQueueCreateSecondaryLoop = mCreateSecondaryLoop;
             secondaryLoopEnter = mEnter;
             secondaryLoopExit = mExit;
+
+            if( DEBUG_AWTEDTUTIL ) {
+                System.err.println("OSXUtil.AWTEDTUtil: available "+available+
+                        ", awtAvailable "+NativeWindowFactory.isAWTAvailable()+
+                        ", EventQueue.isDispatchThread "+(null != eventQueueIsDispatchThread)+
+                        ", EventQueue.createSecondaryLoop "+(null != eventQueueCreateSecondaryLoop)+
+                        ", SecondaryLoop.enter/exit "+(null != secondaryLoopEnter)+"/"+(null != secondaryLoopExit));
+            }
         }
 
         /**
@@ -305,13 +316,34 @@ public class OSXUtil implements ToolkitProperties {
         final AtomicLong nsWin0 = new AtomicLong(0);
         final AtomicLong nsView0 = new AtomicLong(0);
 
-        OSXUtil.RunOnMainThread(true, false /* kickNSApp */, () -> {
-            final long w = OSXUtil.CreateNSWindow0(0, 0, 64, 64);
+        if( DEBUG_RUNONMAIN ) {
+            System.err.println("OSXUtil.CreateNSWindow2: enter x/y "+x+"/"+y+", size "+width+"x"+height+
+                    ", onMain "+IsMainThread()+", onAWTEDT "+AWTEDTUtil.isDispatchThread()+
+                    ", thread "+Thread.currentThread().getName());
+            if( DEBUG_RUNONMAIN_STACK ) {
+                ExceptionUtils.dumpStack(System.err);
+            }
+        }
+
+        // Waking NSApp helps ensuring the runnable gets processed promptly on the AppKit main thread
+        // (important when invoked while AWT is in the middle of realization/layout).
+        OSXUtil.RunOnMainThread(true, true /* kickNSApp */, () -> {
+            final long w = OSXUtil.CreateNSWindow0(x, y, width, height);
             if( 0 != w ) {
                 nsWin0.set( w );
                 nsView0.set( OSXUtil.GetNSView0(w) );
             }
+            if( DEBUG_RUNONMAIN ) {
+                System.err.println("OSXUtil.CreateNSWindow2: appkit created win 0x"+Long.toHexString(w)+
+                        ", view 0x"+Long.toHexString(nsView0.get())+
+                        ", thread "+Thread.currentThread().getName());
+            }
         });
+        if( DEBUG_RUNONMAIN ) {
+            System.err.println("OSXUtil.CreateNSWindow2: exit win 0x"+Long.toHexString(nsWin0.get())+
+                    ", view 0x"+Long.toHexString(nsView0.get())+
+                    ", thread "+Thread.currentThread().getName());
+        }
         return new WinAndView(nsWin0.get(), nsView0.get());
     }
 
@@ -457,8 +489,24 @@ public class OSXUtil implements ToolkitProperties {
      * @param runnable
      */
     public static void RunOnMainThread(final boolean waitUntilDone, final boolean kickNSApp, final Runnable runnable) {
+        final long t0;
+        if( DEBUG_RUNONMAIN ) {
+            t0 = System.currentTimeMillis();
+            System.err.println("OSXUtil.RunOnMainThread: enter wait "+waitUntilDone+", kickNSApp "+kickNSApp+
+                    ", onMain "+IsMainThread()+", onAWTEDT "+AWTEDTUtil.isDispatchThread()+
+                    ", thread "+Thread.currentThread().getName());
+            if( DEBUG_RUNONMAIN_STACK ) {
+                ExceptionUtils.dumpStack(System.err);
+            }
+        } else {
+            t0 = 0;
+        }
         if( IsMainThread() ) {
             runnable.run(); // don't leave the JVM
+            if( DEBUG_RUNONMAIN ) {
+                final long dt = System.currentTimeMillis() - t0;
+                System.err.println("OSXUtil.RunOnMainThread: exit (onMain) dt "+dt+" ms, thread "+Thread.currentThread().getName());
+            }
         } else {
             if( waitUntilDone && AWTEDTUtil.isDispatchThread() ) {
                 // Bug 1478: Avoid blocking the AWT EDT in Object.wait() while synchronously waiting for the
@@ -472,20 +520,33 @@ public class OSXUtil implements ToolkitProperties {
                         @Override
                         public void run() {
                             try {
+                                if( DEBUG_RUNONMAIN ) {
+                                    System.err.println("OSXUtil.RunOnMainThread: appkit-runner start, thread "+Thread.currentThread().getName());
+                                }
                                 runnable.run();
                             } catch (final Throwable t) {
                                 throwableRef.set(t);
                             } finally {
                                 // Ensure the EDT leaves the nested event loop even if the runnable fails.
+                                if( DEBUG_RUNONMAIN ) {
+                                    System.err.println("OSXUtil.RunOnMainThread: appkit-runner done, thread "+Thread.currentThread().getName());
+                                }
                                 AWTEDTUtil.exitSecondaryLoop(secondaryLoop);
                             }
                         }
                     };
+                    if( DEBUG_RUNONMAIN ) {
+                        System.err.println("OSXUtil.RunOnMainThread: using AWT SecondaryLoop");
+                    }
                     RunOnMainThread0(kickNSApp, runnable0);
                     AWTEDTUtil.enterSecondaryLoop(secondaryLoop);
                     final Throwable throwable = throwableRef.get();
                     if( null != throwable ) {
                         throw new RuntimeException(throwable);
+                    }
+                    if( DEBUG_RUNONMAIN ) {
+                        final long dt = System.currentTimeMillis() - t0;
+                        System.err.println("OSXUtil.RunOnMainThread: exit (SecondaryLoop) dt "+dt+" ms, thread "+Thread.currentThread().getName());
                     }
                     return;
                 }
@@ -495,6 +556,9 @@ public class OSXUtil implements ToolkitProperties {
             final Object sync = new Object();
             final RunnableTask rt = new RunnableTask( runnable, waitUntilDone ? sync : null, true, waitUntilDone ? null : System.err );
             synchronized(sync) {
+                if( DEBUG_RUNONMAIN ) {
+                    System.err.println("OSXUtil.RunOnMainThread: using sync-wait, thread "+Thread.currentThread().getName());
+                }
                 RunOnMainThread0(kickNSApp, rt);
                 if( waitUntilDone ) {
                     while( rt.isInQueue() ) {
@@ -509,6 +573,11 @@ public class OSXUtil implements ToolkitProperties {
                         }
                     }
                 }
+            }
+            if( DEBUG_RUNONMAIN ) {
+                final long dt = System.currentTimeMillis() - t0;
+                System.err.println("OSXUtil.RunOnMainThread: exit (sync-wait) dt "+dt+" ms, wait "+waitUntilDone+
+                        ", kickNSApp "+kickNSApp+", thread "+Thread.currentThread().getName());
             }
         }
     }

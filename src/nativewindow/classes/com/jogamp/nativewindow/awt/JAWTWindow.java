@@ -671,6 +671,13 @@ public abstract class JAWTWindow implements NativeWindow, OffscreenLayerSurface,
 
   @Override
   public final int lockSurface() throws NativeWindowException, RuntimeException  {
+    if( DEBUG && surfaceLock.isLockedByOtherThread() ) {
+        final Thread owner = surfaceLock.getOwner();
+        System.err.println(jawtStr2("lockSurface.wait")+" owner "+(null != owner ? owner.getName() : "null")+
+            ", queueLen "+surfaceLock.getQueueLength()+
+            ", onAWTEDT "+EventQueue.isDispatchThread());
+        ExceptionUtils.dumpStack(System.err);
+    }
     surfaceLock.lock();
     int res = surfaceLock.getHoldCount() == 1 ? LOCK_SURFACE_NOT_READY : LOCK_SUCCESS; // new lock ?
 
