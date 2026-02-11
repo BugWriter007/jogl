@@ -245,206 +245,194 @@ public class MacOSXJAWTWindow extends JAWTWindow implements MutableSurface {
       return JAWTUtil.getJAWT(getShallUseOffscreenLayer() || isApplet());
   }
 
-    @Override
-    protected int lockSurfaceImpl(final GraphicsConfiguration gc) throws NativeWindowException {
-        int ret = NativeSurface.LOCK_SURFACE_NOT_READY;
-        /**
-         * Offscreen-layer (JAWT CALayer) path: Create an invisible dummy NSWindow/NSView pair once.
-         * <p>
-         * NEWT (and other upper layers) require a non-zero NSView handle as the {@code drawable} handle,
-         * even though actual rendering is done via the JAWT offscreen-layer / CALayer.
-         * </p>
-         * <p>
-         * This operation must run on the AppKit main thread and may be executed while the AWT EDT
-         * is in the middle of peer realization / layout. On macOS 13+ this can lead to a deadlock
-         * between AWT EDT and NEWT EDT if we keep {@link JAWTWindow}'s surface lock and the
-         * {@link com.jogamp.nativewindow.AbstractGraphicsDevice} lock held while synchronously waiting:
-         * the AWT nested event loop (used to avoid freezing the EDT, see Bug 1478) can re-enter NEWT
-         * parenting code, while NEWT simultaneously tries to lock the same surface.
-         * </p>
-         * <p>
-         * To avoid this lock inversion, temporarily drop both locks <em>before</em> touching the JAWT
-         * {@link JAWT_DrawingSurface}, perform the main-thread work, then reacquire the locks and continue.
-         * </p>
-         */
-        if( isOffscreenLayerSurfaceEnabled() && 0 == drawable ) {
-            final com.jogamp.nativewindow.AbstractGraphicsDevice adevice = getGraphicsConfiguration().getScreen().getDevice();
-            final com.jogamp.common.util.locks.RecursiveLock surfaceLock = getLock();
-            final WinAndView wv;
+  @Override
+  protected int lockSurfaceImpl(final GraphicsConfiguration gc) throws NativeWindowException {
+      int ret = NativeSurface.LOCK_SURFACE_NOT_READY;
+      /**
+       * Offscreen-layer (JAWT CALayer) path: Create an invisible dummy NSWindow/NSView pair once.
+       * <p>
+       * NEWT (and other upper layers) require a non-zero NSView handle as the {@code drawable} handle,
+       * even though actual rendering is done via the JAWT offscreen-layer / CALayer.
+       * </p>
+       * <p>
+       * This operation must run on the AppKit main thread and may be executed while the AWT EDT
+       * is in the middle of peer realization / layout. On macOS 13+ this can lead to a deadlock
+       * between AWT EDT and NEWT EDT if we keep {@link JAWTWindow}'s surface lock and the
+       * {@link com.jogamp.nativewindow.AbstractGraphicsDevice} lock held while synchronously waiting:
+       * the AWT nested event loop (used to avoid freezing the EDT, see Bug 1478) can re-enter NEWT
+       * parenting code, while NEWT simultaneously tries to lock the same surface.
+       * </p>
+       * <p>
+       * To avoid this lock inversion, temporarily drop both locks <em>before</em> touching the JAWT
+       * {@link JAWT_DrawingSurface}, perform the main-thread work, then reacquire the locks and continue.
+       * </p>
+       */
+      if( isOffscreenLayerSurfaceEnabled() && 0 == drawable ) {
+          final com.jogamp.nativewindow.AbstractGraphicsDevice adevice = getGraphicsConfiguration().getScreen().getDevice();
+          final com.jogamp.common.util.locks.RecursiveLock surfaceLock = getLock();
+          final WinAndView wv;
 
-            if( DEBUG_OSX_LOCK ) {
-                System.err.println("MacOSXJAWTWindow.lockSurfaceImpl: create dummy NSWindow/NSView start, thread "+Thread.currentThread().getName()+
-                        ", drawable 0x"+Long.toHexString(drawable)+", windowHandle 0x"+Long.toHexString(windowHandle)+
-                        ", surfaceLock[hold "+surfaceLock.getHoldCount()+", qlen "+surfaceLock.getQueueLength()+", owner "+surfaceLock.getOwner()+"]"+
-                        ", adevice "+adevice);
-                if( DEBUG_OSX_LOCK_STACK ) {
-                    com.jogamp.common.ExceptionUtils.dumpStack(System.err);
-                }
-            }
+          if( DEBUG_OSX_LOCK ) {
+              System.err.println("MacOSXJAWTWindow.lockSurfaceImpl: create dummy NSWindow/NSView start, thread "+Thread.currentThread().getName()+
+                      ", drawable 0x"+Long.toHexString(drawable)+", windowHandle 0x"+Long.toHexString(windowHandle)+
+                      ", surfaceLock[hold "+surfaceLock.getHoldCount()+", qlen "+surfaceLock.getQueueLength()+", owner "+surfaceLock.getOwner()+"]"+
+                      ", adevice "+adevice);
+              if( DEBUG_OSX_LOCK_STACK ) {
+                  com.jogamp.common.ExceptionUtils.dumpStack(System.err);
+              }
+          }
 
-            // Drop locks in reverse acquisition order (device -> surface) and reacquire (surface -> device).
-            adevice.unlock();
-            surfaceLock.unlock();
-            try {
-                if( DEBUG_OSX_LOCK ) {
-                    System.err.println("MacOSXJAWTWindow.lockSurfaceImpl: create dummy NSWindow/NSView - dropped locks, calling OSXUtil.CreateNSWindow2(..)");
-                }
-                wv = OSXUtil.CreateNSWindow2(0, 0, 64, 64);
-            } finally {
-                surfaceLock.lock();
-                adevice.lock();
-            }
+          // Drop locks in reverse acquisition order (device -> surface) and reacquire (surface -> device).
+          adevice.unlock();
+          surfaceLock.unlock();
+          try {
+              if( DEBUG_OSX_LOCK ) {
+                  System.err.println("MacOSXJAWTWindow.lockSurfaceImpl: create dummy NSWindow/NSView - dropped locks, calling OSXUtil.CreateNSWindow2(..)");
+              }
+              wv = OSXUtil.CreateNSWindow2(0, 0, 64, 64);
+          } finally {
+              surfaceLock.lock();
+              adevice.lock();
+          }
 
-            if( DEBUG_OSX_LOCK ) {
-                System.err.println("MacOSXJAWTWindow.lockSurfaceImpl: create dummy NSWindow/NSView - reacquired locks, got win 0x"+Long.toHexString(wv.win)+
-                        ", view 0x"+Long.toHexString(wv.view)+", thread "+Thread.currentThread().getName()+
-                        ", surfaceLock[hold "+surfaceLock.getHoldCount()+", qlen "+surfaceLock.getQueueLength()+", owner "+surfaceLock.getOwner()+"]");
-            }
+          if( DEBUG_OSX_LOCK ) {
+              System.err.println("MacOSXJAWTWindow.lockSurfaceImpl: create dummy NSWindow/NSView - reacquired locks, got win 0x"+Long.toHexString(wv.win)+
+                      ", view 0x"+Long.toHexString(wv.view)+", thread "+Thread.currentThread().getName()+
+                      ", surfaceLock[hold "+surfaceLock.getHoldCount()+", qlen "+surfaceLock.getQueueLength()+", owner "+surfaceLock.getOwner()+"]");
+          }
 
-            // Another thread may have initialized while the locks were dropped.
-            if( 0 == drawable ) {
-                windowHandle = wv.win;
-                if(0 == windowHandle) {
-                    throw new NativeWindowException("Unable to create dummy NSWindow (layered case): "+this);
-                }
-                drawable = wv.view;
-                if(0 == drawable) {
-                    throw new NativeWindowException("Null NSView of NSWindow "+toHexString(windowHandle)+": "+this);
-                }
+          // Another thread may have initialized while the locks were dropped.
+          if( 0 == drawable ) {
+              windowHandle = wv.win;
+              if(0 == windowHandle) {
+                  throw new NativeWindowException("Unable to create dummy NSWindow (layered case): "+this);
+              }
+              drawable = wv.view;
+              if(0 == drawable) {
+                  final long createdWin = windowHandle;
+                  windowHandle = 0;
+                  OSXUtil.RunOnMainThread(false /* wait */, false, new Runnable() {
+                      @Override
+                      public void run() {
+                          OSXUtil.DestroyNSWindow(createdWin);
+                      } } );
+                  throw new NativeWindowException("Null NSView of NSWindow "+toHexString(createdWin)+": "+this);
+              }
+              if( DEBUG_OSX_LOCK ) {
+                  System.err.println("MacOSXJAWTWindow.lockSurfaceImpl: installed dummy NSWindow/NSView win 0x"+Long.toHexString(windowHandle)+
+                          ", view 0x"+Long.toHexString(drawable)+", thread "+Thread.currentThread().getName());
+              }
 
-                if( DEBUG_OSX_LOCK ) {
-                    System.err.println("MacOSXJAWTWindow.lockSurfaceImpl: installed dummy NSWindow/NSView win 0x"+Long.toHexString(windowHandle)+
-                            ", view 0x"+Long.toHexString(drawable)+", thread "+Thread.currentThread().getName());
-                }
+              // Fix caps reflecting offscreen! (no GL available here ..)
+              final Capabilities caps = (Capabilities) getGraphicsConfiguration().getChosenCapabilities().cloneMutable();
+              caps.setOnscreen(false);
+              setChosenCapabilities(caps);
+          } else if( 0 != wv.win ) {
+              // Cleanup: We created a dummy NSWindow, but another thread won the race and installed its own.
+              // Destroy the now-unreferenced window on the AppKit main thread.
+              final long createdWin = wv.win;
+              if( DEBUG_OSX_LOCK ) {
+                  System.err.println("MacOSXJAWTWindow.lockSurfaceImpl: discarding extra dummy NSWindow 0x"+Long.toHexString(createdWin)+
+                          ", thread "+Thread.currentThread().getName());
+              }
+              OSXUtil.RunOnMainThread(false /* wait */, false /* kickNSApp */, new Runnable() {
+                  @Override
+                  public void run() {
+                      OSXUtil.DestroyNSWindow(createdWin);
+                  } } );
+          }
+      }
+      ds = getJAWT().GetDrawingSurface(component);
+      if (ds == null) {
+          // Widget not yet realized
+          unlockSurfaceImpl();
+          return NativeSurface.LOCK_SURFACE_NOT_READY;
+      }
+      final int res = ds.Lock();
+      dsLocked = ( 0 == ( res & JAWTFactory.JAWT_LOCK_ERROR ) ) ;
+      if (!dsLocked) {
+          unlockSurfaceImpl();
+          throw new NativeWindowException("Unable to lock surface");
+      }
+      // See whether the surface changed and if so destroy the old
+      // OpenGL context so it will be recreated (NOTE: removeNotify
+      // should handle this case, but it may be possible that race
+      // conditions can cause this code to be triggered -- should test
+      // more)
+      if ((res & JAWTFactory.JAWT_LOCK_SURFACE_CHANGED) != 0) {
+          ret = NativeSurface.LOCK_SURFACE_CHANGED;
+      }
+      if (firstLock) {
+          SecurityUtil.doPrivileged(new PrivilegedAction<Object>() {
+              @Override
+              public Object run() {
+                  dsi = ds.GetDrawingSurfaceInfo();
+                  return null;
+              }
+          });
+      } else {
+          dsi = ds.GetDrawingSurfaceInfo();
+      }
+      if (dsi == null) {
+          unlockSurfaceImpl();
+          return NativeSurface.LOCK_SURFACE_NOT_READY;
+      }
+      updateLockedData(dsi.getBounds(), gc);
+      if (DEBUG && firstLock ) {
+          dumpInfo();
+      }
+      firstLock = false;
+      if( !isOffscreenLayerSurfaceEnabled() ) {
+          macosxdsi = (JAWT_MacOSXDrawingSurfaceInfo) dsi.platformInfo(getJAWT());
+          if (macosxdsi == null) {
+              unlockSurfaceImpl();
+              return NativeSurface.LOCK_SURFACE_NOT_READY;
+          }
+          drawable = macosxdsi.getCocoaViewRef();
 
-                // Fix caps reflecting offscreen! (no GL available here ..)
-                final Capabilities caps = (Capabilities) getGraphicsConfiguration().getChosenCapabilities().cloneMutable();
-                caps.setOnscreen(false);
-                setChosenCapabilities(caps);
-            } else if( 0 != wv.win ) {
-                // Cleanup: We created a dummy NSWindow, but another thread won the race and installed its own.
-                // Destroy the now-unreferenced window on the AppKit main thread.
-                final long createdWin = wv.win;
-                if( DEBUG_OSX_LOCK ) {
-                    System.err.println("MacOSXJAWTWindow.lockSurfaceImpl: discarding extra dummy NSWindow 0x"+Long.toHexString(createdWin)+
-                            ", thread "+Thread.currentThread().getName());
-                }
-                OSXUtil.RunOnMainThread(false /* wait */, false /* kickNSApp */, new Runnable() {
-                    @Override
-                    public void run() {
-                        OSXUtil.DestroyNSWindow(createdWin);
-                    } } );
-            }
-        }
-        ds = getJAWT().GetDrawingSurface(component);
-        if (ds == null) {
-            // Widget not yet realized
-            unlockSurfaceImpl();
-            return NativeSurface.LOCK_SURFACE_NOT_READY;
-        }
-        final int res = ds.Lock();
-        dsLocked = ( 0 == ( res & JAWTFactory.JAWT_LOCK_ERROR ) ) ;
-        if (!dsLocked) {
-            unlockSurfaceImpl();
-            throw new NativeWindowException("Unable to lock surface");
-        }
-        // See whether the surface changed and if so destroy the old
-        // OpenGL context so it will be recreated (NOTE: removeNotify
-        // should handle this case, but it may be possible that race
-        // conditions can cause this code to be triggered -- should test
-        // more)
-        if ((res & JAWTFactory.JAWT_LOCK_SURFACE_CHANGED) != 0) {
-            ret = NativeSurface.LOCK_SURFACE_CHANGED;
-        }
-        if (firstLock) {
-            SecurityUtil.doPrivileged(new PrivilegedAction<Object>() {
-                @Override
-                public Object run() {
-                    dsi = ds.GetDrawingSurfaceInfo();
-                    return null;
-                }
-            });
-        } else {
-            dsi = ds.GetDrawingSurfaceInfo();
-        }
-        if (dsi == null) {
-            unlockSurfaceImpl();
-            return NativeSurface.LOCK_SURFACE_NOT_READY;
-        }
-        updateLockedData(dsi.getBounds(), gc);
-        if (DEBUG && firstLock ) {
-            dumpInfo();
-        }
-        firstLock = false;
-        if( !isOffscreenLayerSurfaceEnabled() ) {
-            macosxdsi = (JAWT_MacOSXDrawingSurfaceInfo) dsi.platformInfo(getJAWT());
-            if (macosxdsi == null) {
-                unlockSurfaceImpl();
-                return NativeSurface.LOCK_SURFACE_NOT_READY;
-            }
-            drawable = macosxdsi.getCocoaViewRef();
-
-            if (drawable == 0) {
-                unlockSurfaceImpl();
-                return NativeSurface.LOCK_SURFACE_NOT_READY;
-            } else {
-                windowHandle = OSXUtil.GetNSWindow(drawable);
-                ret = NativeSurface.LOCK_SUCCESS;
-            }
-        } else {
-            /**
-             * Only create a fake invisible NSWindow for the drawable handle
-             * to please frameworks requiring such (eg. NEWT).
-             *
-             * The actual surface/ca-layer shall be created/attached
-             * by the upper framework (JOGL) since they require more information.
-             */
-            String errMsg = null;
-            if(null == errMsg) {
-                jawtSurfaceLayersHandle = GetJAWTSurfaceLayersHandle0(dsi.getBuffer());
-                OSXUtil.RunOnMainThread(false /* wait */, false, new Runnable() {
-                    @Override
-                    public void run() {
-                        String errMsg = null;
-                        if(0 == rootSurfaceLayer && 0 != jawtSurfaceLayersHandle) {
-                            rootSurfaceLayer = OSXUtil.CreateCALayer(jawt_surface_bounds.getWidth(), jawt_surface_bounds.getHeight(), getPixelScaleX()); // HiDPI: uniform pixel scale
-                            if(0 == rootSurfaceLayer) {
-                                errMsg = "Could not create root CALayer";
-                            } else {
-                                try {
-                                    SetJAWTRootSurfaceLayer0(jawtSurfaceLayersHandle, rootSurfaceLayer);
-                                } catch(final Exception e) {
-                                    errMsg = "Could not set JAWT rootSurfaceLayerHandle "+toHexString(rootSurfaceLayer)+", cause: "+e.getMessage();
-                                }
-                            }
-                            if(null != errMsg) {
-                                if(0 != rootSurfaceLayer) {
-                                  OSXUtil.DestroyCALayer(rootSurfaceLayer);
-                                  rootSurfaceLayer = 0;
-                                }
-                                throw new NativeWindowException(errMsg+": "+MacOSXJAWTWindow.this);
-                            }
-                        }
-                    } } );
-        }
-        if(null != errMsg) {
-            if(0 != windowHandle) {
-                final long _windowHandle = windowHandle;
-                windowHandle = 0;
-                OSXUtil.RunOnMainThread(false /* wait */, false, new Runnable() {
-                        @Override
-                        public void run() {
-                            OSXUtil.DestroyNSWindow(_windowHandle);
-                        } } );
-            }
-            drawable = 0;
-            unlockSurfaceImpl();
-            throw new NativeWindowException(errMsg+": "+this);
-        }
-        ret = NativeSurface.LOCK_SUCCESS;
-    }
-
-    return ret;
+          if (drawable == 0) {
+              unlockSurfaceImpl();
+              return NativeSurface.LOCK_SURFACE_NOT_READY;
+          } else {
+              windowHandle = OSXUtil.GetNSWindow(drawable);
+              ret = NativeSurface.LOCK_SUCCESS;
+          }
+      } else {
+          /**
+           * The fake invisible NSWindow for the drawable handle
+           * to please frameworks requiring such (eg. NEWT) has been created above.
+           *
+           * The actual surface/ca-layer shall be created/attached
+           * by the upper framework (JOGL) since they require more information.
+           */
+          jawtSurfaceLayersHandle = GetJAWTSurfaceLayersHandle0(dsi.getBuffer());
+          OSXUtil.RunOnMainThread(false /* wait */, false, new Runnable() {
+              @Override
+              public void run() {
+                  String errMsg = null;
+                  if(0 == rootSurfaceLayer && 0 != jawtSurfaceLayersHandle) {
+                      rootSurfaceLayer = OSXUtil.CreateCALayer(jawt_surface_bounds.getWidth(), jawt_surface_bounds.getHeight(), getPixelScaleX()); // HiDPI: uniform pixel scale
+                      if(0 == rootSurfaceLayer) {
+                          errMsg = "Could not create root CALayer";
+                      } else {
+                          try {
+                              SetJAWTRootSurfaceLayer0(jawtSurfaceLayersHandle, rootSurfaceLayer);
+                          } catch(final Exception e) {
+                              errMsg = "Could not set JAWT rootSurfaceLayerHandle "+toHexString(rootSurfaceLayer)+", cause: "+e.getMessage();
+                          }
+                      }
+                      if(null != errMsg) {
+                          if(0 != rootSurfaceLayer) {
+                              OSXUtil.DestroyCALayer(rootSurfaceLayer);
+                              rootSurfaceLayer = 0;
+                          }
+                          throw new NativeWindowException(errMsg+": "+MacOSXJAWTWindow.this);
+                      }
+                  }
+              } } );
+          ret = NativeSurface.LOCK_SUCCESS;
+      }
+      return ret;
   }
 
   @Override

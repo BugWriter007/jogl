@@ -97,7 +97,7 @@ public abstract class JAWTWindow implements NativeWindow, OffscreenLayerSurface,
   // lifetime: valid after lock but may change with each 1st lock, purges after invalidate
   private JAWT jawt;
   private boolean isOffscreenLayerSurface;
-  protected long drawable;
+  protected volatile long drawable; // potential concurrent access on MacOS
   protected Rectangle jawt_surface_bounds;
   protected Insets insets;
   private volatile long offscreenSurfaceLayer;

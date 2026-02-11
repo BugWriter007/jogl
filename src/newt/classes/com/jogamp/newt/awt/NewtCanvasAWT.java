@@ -1059,9 +1059,9 @@ public class NewtCanvasAWT extends java.awt.Canvas implements NativeWindowHolder
         // the problematic AWT/NEWT reparent sequence can occur before that point (e.g. during the
         // first attach while the AWT peer is being realized).
         if( EventQueue.isDispatchThread() &&
-                Platform.OSType.MACOS == Platform.getOSType() &&
-                null != jawtWindow ) {
-
+            Platform.OSType.MACOS == Platform.getOSType() &&
+            null != jawtWindow )
+        {
             final SecondaryLoop loop = Toolkit.getDefaultToolkit().getSystemEventQueue().createSecondaryLoop();
             if( null == loop ) {
                 // Fallback: should not happen on supported JDKs, but keep existing behavior.
