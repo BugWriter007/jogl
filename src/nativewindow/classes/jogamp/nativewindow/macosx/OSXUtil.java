@@ -507,123 +507,61 @@ public class OSXUtil implements ToolkitProperties {
                 final long dt = System.currentTimeMillis() - t0;
                 System.err.println("OSXUtil.RunOnMainThread: exit (onMain) dt "+dt+" ms, thread "+Thread.currentThread().getName());
             }
-        } else {
-            if( waitUntilDone && AWTEDTUtil.isDispatchThread() ) {
-                // Bug 1478: Avoid blocking the AWT EDT in Object.wait() while synchronously waiting for the
-                // AppKit main-thread runnable. The AppKit-side work (e.g. NSWindow/NSView creation used by the
-                // CALayer/JAWT path) can require AWT events to be processed during window/peer realization.
-                // Using an AWT SecondaryLoop keeps the EDT dispatching while we wait for completion.
-                final Object secondaryLoop = AWTEDTUtil.createSecondaryLoop();
-                if( null != secondaryLoop ) {
-                    final AtomicReference<Throwable> throwableRef = new AtomicReference<Throwable>();
-                    final Runnable runnable0 = new Runnable() {
-                        @Override
-                        public void run() {
-                            try {
-                                if( DEBUG_RUNONMAIN ) {
-                                    System.err.println("OSXUtil.RunOnMainThread: appkit-runner start, thread "+Thread.currentThread().getName());
-                                }
-                                runnable.run();
-                            } catch (final Throwable t) {
-                                throwableRef.set(t);
-                            } finally {
-                                // Ensure the EDT leaves the nested event loop even if the runnable fails.
-                                if( DEBUG_RUNONMAIN ) {
-                                    System.err.println("OSXUtil.RunOnMainThread: appkit-runner done, thread "+Thread.currentThread().getName());
-                                }
-                                AWTEDTUtil.exitSecondaryLoop(secondaryLoop);
-                            }
-                        }
-                    };
-                    if( DEBUG_RUNONMAIN ) {
-                        System.err.println("OSXUtil.RunOnMainThread: using AWT SecondaryLoop");
-                    }
-                    RunOnMainThread0(kickNSApp, runnable0);
-                    AWTEDTUtil.enterSecondaryLoop(secondaryLoop);
-                    final Throwable throwable = throwableRef.get();
-                    if( null != throwable ) {
-                        throw new RuntimeException(throwable);
-                    }
-                    if( DEBUG_RUNONMAIN ) {
-                        final long dt = System.currentTimeMillis() - t0;
-                        System.err.println("OSXUtil.RunOnMainThread: exit (SecondaryLoop) dt "+dt+" ms, thread "+Thread.currentThread().getName());
-                    }
-                    return;
-                }
-            }
-            // Utilize Java side lock/wait and simply pass the Runnable async to OSX main thread,
-            // otherwise we may freeze the OSX main thread.
-            final Object sync = new Object();
-            final RunnableTask rt = new RunnableTask( runnable, waitUntilDone ? sync : null, true, waitUntilDone ? null : System.err );
-            synchronized(sync) {
-                if( DEBUG_RUNONMAIN ) {
-                    System.err.println("OSXUtil.RunOnMainThread: using sync-wait, thread "+Thread.currentThread().getName());
-                }
-                RunOnMainThread0(kickNSApp, rt);
-                if( waitUntilDone ) {
-                    while( rt.isInQueue() ) {
+            return;
+        }
+        if( waitUntilDone && AWTEDTUtil.isDispatchThread() ) {
+            // Bug 1478: Avoid blocking the AWT EDT in Object.wait() while synchronously waiting for the
+            // AppKit main-thread runnable. The AppKit-side work (e.g. NSWindow/NSView creation used by the
+            // CALayer/JAWT path) can require AWT events to be processed during window/peer realization.
+            // Using an AWT SecondaryLoop keeps the EDT dispatching while we wait for completion.
+            final Object secondaryLoop = AWTEDTUtil.createSecondaryLoop();
+            if( null != secondaryLoop ) {
+                final AtomicReference<Throwable> throwableRef = new AtomicReference<Throwable>();
+                final Runnable runnable0 = new Runnable() {
+                    @Override
+                    public void run() {
                         try {
-                            sync.wait();
-                        } catch (final InterruptedException ie) {
-                            throw new InterruptedRuntimeException(ie);
-                        }
-                        final Throwable throwable = rt.getThrowable();
-                        if(null!=throwable) {
-                            throw new RuntimeException(throwable);
+                            if( DEBUG_RUNONMAIN ) {
+                                System.err.println("OSXUtil.RunOnMainThread: appkit-runner start, thread "+Thread.currentThread().getName());
+                            }
+                            runnable.run();
+                        } catch (final Throwable t) {
+                            throwableRef.set(t);
+                        } finally {
+                            // Ensure the EDT leaves the nested event loop even if the runnable fails.
+                            if( DEBUG_RUNONMAIN ) {
+                                System.err.println("OSXUtil.RunOnMainThread: appkit-runner done, thread "+Thread.currentThread().getName());
+                            }
+                            AWTEDTUtil.exitSecondaryLoop(secondaryLoop);
                         }
                     }
+                };
+                if( DEBUG_RUNONMAIN ) {
+                    System.err.println("OSXUtil.RunOnMainThread: using AWT SecondaryLoop");
                 }
-            }
-            if( DEBUG_RUNONMAIN ) {
-                final long dt = System.currentTimeMillis() - t0;
-                System.err.println("OSXUtil.RunOnMainThread: exit (sync-wait) dt "+dt+" ms, wait "+waitUntilDone+
-                        ", kickNSApp "+kickNSApp+", thread "+Thread.currentThread().getName());
+                RunOnMainThread0(kickNSApp, runnable0);
+                AWTEDTUtil.enterSecondaryLoop(secondaryLoop);
+                final Throwable throwable = throwableRef.get();
+                if( null != throwable ) {
+                    throw new RuntimeException(throwable);
+                }
+                if( DEBUG_RUNONMAIN ) {
+                    final long dt = System.currentTimeMillis() - t0;
+                    System.err.println("OSXUtil.RunOnMainThread: exit (SecondaryLoop) dt "+dt+" ms, thread "+Thread.currentThread().getName());
+                }
+                return;
             }
         }
-    }
-    static public interface LongTask {
-        public long eval();
-    }
-    public static long RunOnMainThreadLong(final boolean kickNSApp, final LongTask task) {
-        if( IsMainThread() ) {
-            return task.eval(); // don't leave the JVM
-        } else {
-            if( AWTEDTUtil.isDispatchThread() ) {
-                // See RunOnMainThread(..): keep the AWT EDT responsive while synchronously waiting for AppKit.
-                final Object secondaryLoop = AWTEDTUtil.createSecondaryLoop();
-                if( null != secondaryLoop ) {
-                    final AtomicLong result = new AtomicLong(0);
-                    final AtomicReference<Throwable> throwableRef = new AtomicReference<Throwable>();
-                    final Runnable runnable = new Runnable() {
-                        @Override
-                        public void run() {
-                            try {
-                                result.set(task.eval());
-                            } catch (final Throwable t) {
-                                throwableRef.set(t);
-                            } finally {
-                                // Ensure the EDT leaves the nested event loop even if the runnable fails.
-                                AWTEDTUtil.exitSecondaryLoop(secondaryLoop);
-                            }
-                        }
-                    };
-                    RunOnMainThread0(kickNSApp, runnable);
-                    AWTEDTUtil.enterSecondaryLoop(secondaryLoop);
-                    final Throwable throwable = throwableRef.get();
-                    if( null != throwable ) {
-                        throw new RuntimeException(throwable);
-                    }
-                    return result.get();
-                }
+        // Utilize Java side lock/wait and simply pass the Runnable async to OSX main thread,
+        // otherwise we may freeze the OSX main thread.
+        final Object sync = new Object();
+        final RunnableTask rt = new RunnableTask( runnable, waitUntilDone ? sync : null, true, waitUntilDone ? null : System.err );
+        synchronized(sync) {
+            if( DEBUG_RUNONMAIN ) {
+                System.err.println("OSXUtil.RunOnMainThread: using sync-wait, thread "+Thread.currentThread().getName());
             }
-            // Utilize Java side lock/wait and simply pass the Runnable async to OSX main thread,
-            // otherwise we may freeze the OSX main thread.
-            final Object sync = new Object();
-            final AtomicLong result = new AtomicLong(0);
-            final Runnable task0 = () -> { result.set( task.eval() ); };
-            final RunnableTask rt = new RunnableTask( task0, sync, true, null);
-            synchronized(sync) {
-                RunOnMainThread0(kickNSApp, rt);
+            RunOnMainThread0(kickNSApp, rt);
+            if( waitUntilDone ) {
                 while( rt.isInQueue() ) {
                     try {
                         sync.wait();
@@ -636,8 +574,69 @@ public class OSXUtil implements ToolkitProperties {
                     }
                 }
             }
-            return result.get();
         }
+        if( DEBUG_RUNONMAIN ) {
+            final long dt = System.currentTimeMillis() - t0;
+            System.err.println("OSXUtil.RunOnMainThread: exit (sync-wait) dt "+dt+" ms, wait "+waitUntilDone+
+                    ", kickNSApp "+kickNSApp+", thread "+Thread.currentThread().getName());
+        }
+    }
+    static public interface LongTask {
+        public long eval();
+    }
+    public static long RunOnMainThreadLong(final boolean kickNSApp, final LongTask task) {
+        if( IsMainThread() ) {
+            return task.eval(); // don't leave the JVM
+        }
+        if( AWTEDTUtil.isDispatchThread() ) {
+            // See RunOnMainThread(..): keep the AWT EDT responsive while synchronously waiting for AppKit.
+            final Object secondaryLoop = AWTEDTUtil.createSecondaryLoop();
+            if( null != secondaryLoop ) {
+                final AtomicLong result = new AtomicLong(0);
+                final AtomicReference<Throwable> throwableRef = new AtomicReference<Throwable>();
+                final Runnable runnable = new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            result.set(task.eval());
+                        } catch (final Throwable t) {
+                            throwableRef.set(t);
+                        } finally {
+                            // Ensure the EDT leaves the nested event loop even if the runnable fails.
+                            AWTEDTUtil.exitSecondaryLoop(secondaryLoop);
+                        }
+                    }
+                };
+                RunOnMainThread0(kickNSApp, runnable);
+                AWTEDTUtil.enterSecondaryLoop(secondaryLoop);
+                final Throwable throwable = throwableRef.get();
+                if( null != throwable ) {
+                    throw new RuntimeException(throwable);
+                }
+                return result.get();
+            }
+        }
+        // Utilize Java side lock/wait and simply pass the Runnable async to OSX main thread,
+        // otherwise we may freeze the OSX main thread.
+        final Object sync = new Object();
+        final AtomicLong result = new AtomicLong(0);
+        final Runnable task0 = () -> { result.set( task.eval() ); };
+        final RunnableTask rt = new RunnableTask( task0, sync, true, null);
+        synchronized(sync) {
+            RunOnMainThread0(kickNSApp, rt);
+            while( rt.isInQueue() ) {
+                try {
+                    sync.wait();
+                } catch (final InterruptedException ie) {
+                    throw new InterruptedRuntimeException(ie);
+                }
+                final Throwable throwable = rt.getThrowable();
+                if(null!=throwable) {
+                    throw new RuntimeException(throwable);
+                }
+            }
+        }
+        return result.get();
     }
 
     /**
@@ -688,56 +687,55 @@ public class OSXUtil implements ToolkitProperties {
     public static <R,A> R RunOnMainThread(final boolean kickNSApp, final Function<R,A> func, final A... args) {
         if( IsMainThread() ) {
             return func.eval(args); // don't leave the JVM
-        } else {
-            if( AWTEDTUtil.isDispatchThread() ) {
-                // See RunOnMainThread(..): keep the AWT EDT responsive while synchronously waiting for AppKit.
-                final Object secondaryLoop = AWTEDTUtil.createSecondaryLoop();
-                if( null != secondaryLoop ) {
-                    final AtomicReference<R> result = new AtomicReference<R>();
-                    final AtomicReference<Throwable> throwableRef = new AtomicReference<Throwable>();
-                    final Runnable runnable = new Runnable() {
-                        @Override
-                        public void run() {
-                            try {
-                                result.set(func.eval(args));
-                            } catch (final Throwable t) {
-                                throwableRef.set(t);
-                            } finally {
-                                // Ensure the EDT leaves the nested event loop even if the runnable fails.
-                                AWTEDTUtil.exitSecondaryLoop(secondaryLoop);
-                            }
-                        }
-                    };
-                    RunOnMainThread0(kickNSApp, runnable);
-                    AWTEDTUtil.enterSecondaryLoop(secondaryLoop);
-                    final Throwable throwable = throwableRef.get();
-                    if( null != throwable ) {
-                        throw new RuntimeException(throwable);
-                    }
-                    return result.get();
-                }
-            }
-            // Utilize Java side lock/wait and simply pass the Runnable async to OSX main thread,
-            // otherwise we may freeze the OSX main thread.
-            final Object sync = new Object();
-            final FunctionTask<R,A> rt = new FunctionTask<R,A>( func, sync, true, null);
-            synchronized(sync) {
-                rt.setArgs(args);
-                RunOnMainThread0(kickNSApp, rt);
-                while( rt.isInQueue() ) {
-                    try {
-                        sync.wait();
-                    } catch (final InterruptedException ie) {
-                        throw new InterruptedRuntimeException(ie);
-                    }
-                    final Throwable throwable = rt.getThrowable();
-                    if(null!=throwable) {
-                        throw new RuntimeException(throwable);
-                    }
-                }
-            }
-            return rt.getResult();
         }
+        if( AWTEDTUtil.isDispatchThread() ) {
+            // See RunOnMainThread(..): keep the AWT EDT responsive while synchronously waiting for AppKit.
+            final Object secondaryLoop = AWTEDTUtil.createSecondaryLoop();
+            if( null != secondaryLoop ) {
+                final AtomicReference<R> result = new AtomicReference<R>();
+                final AtomicReference<Throwable> throwableRef = new AtomicReference<Throwable>();
+                final Runnable runnable = new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            result.set(func.eval(args));
+                        } catch (final Throwable t) {
+                            throwableRef.set(t);
+                        } finally {
+                            // Ensure the EDT leaves the nested event loop even if the runnable fails.
+                            AWTEDTUtil.exitSecondaryLoop(secondaryLoop);
+                        }
+                    }
+                };
+                RunOnMainThread0(kickNSApp, runnable);
+                AWTEDTUtil.enterSecondaryLoop(secondaryLoop);
+                final Throwable throwable = throwableRef.get();
+                if( null != throwable ) {
+                    throw new RuntimeException(throwable);
+                }
+                return result.get();
+            }
+        }
+        // Utilize Java side lock/wait and simply pass the Runnable async to OSX main thread,
+        // otherwise we may freeze the OSX main thread.
+        final Object sync = new Object();
+        final FunctionTask<R,A> rt = new FunctionTask<R,A>( func, sync, true, null);
+        synchronized(sync) {
+            rt.setArgs(args);
+            RunOnMainThread0(kickNSApp, rt);
+            while( rt.isInQueue() ) {
+                try {
+                    sync.wait();
+                } catch (final InterruptedException ie) {
+                    throw new InterruptedRuntimeException(ie);
+                }
+                final Throwable throwable = rt.getThrowable();
+                if(null!=throwable) {
+                    throw new RuntimeException(throwable);
+                }
+            }
+        }
+        return rt.getResult();
     }
 
     /**
